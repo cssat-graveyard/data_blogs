@@ -1,0 +1,405 @@
+The Movement of Foster Children in Washington State 
+========================================================
+
+The work of the foster care system has a large geographic component. At a fundamental level, foster children are moved from one location and placed in another. Ideally, children stay close to the home from which they were removed. This cannot, however, always happen. Sometimes children might have a relative or other kin who is willing to care for them in another part of the state or country. In other cases, children might be removed from a home in an area where there is a lack of licensed foster homes. 
+
+One way to visualize the extent to which children stay close to their homes is with a network map. Paul Butler, an intern at Facebook, did the same thing with [Facebook connections](https://www.facebook.com/notes/facebook-engineering/visualizing-friendships/469716398919) in 2010. We can take this same approach and apply it to the movement of foster children in Washington State. In our case, instead of plotting the connections between Facebook friends, we are plotting the original location and current location for foster children in Washington State. 
+
+```{r load_packages, echo=FALSE, message=FALSE, warning=FALSE,  eval=FALSE}
+#"C:\OSGeo4W64\bin\ogr2ogr" -lco SCHEMA=geog -f MSSQLSpatial "MSSQL:server=POC2;database=dbCoreAdministrativeTables;trusted_connection=yes" "S:\Data Portal\geo_data\ZIP_Boundaries_WA.shp"
+
+rm(list=ls()) 
+
+#remove.packages("RODBC")
+#install.packages("C:\\Users\\mienkoja\\Dropbox\\blog1\\RODBC"
+#                 ,repos = NULL
+#                 ,type="source")
+
+require(maps)
+require(geosphere)
+require(RODBC)
+require(rgeos)
+require(sp)
+require(sqldf)
+require(arcdiagram)
+require(pocr)
+require(scales)
+require(reshape)
+require(extrafont)
+
+
+cn <- odbcConnect("POC")
+```
+
+
+```{r load_base_data, cache=TRUE, echo=FALSE, message=FALSE, tidy=FALSE, eval=FALSE}
+zip_bound <- sqlQuery(cn, "select
+                        zbr.ogr_geometry.STAsText() zip_geom 
+                        ,zbr.zip
+                      from geog.zip_boundaries_wa zbr")
+
+zips_dat <- sqlQuery(cn, "select
+                            rp.zip rem_zip
+                          	,pd.phys_zip_5 cur_zip
+                            ,zbc.lon lon_c
+                            ,zbr.lon lon_r  
+                            ,zbc.lat lat_c
+                            ,zbr.lat lat_r  
+                          from ca_ods.base.rptPlacement rp
+                          	join ca_ods.dbo.placement_fact pf
+                          		on pf.id_placement_fact = rp.id_placement_fact 
+                          	join ca_ods.dbo.provider_dim pd
+                          		on pd.id_provider_dim = pf.id_provider_dim_caregiver
+                          	join geog.zip_boundaries_wa zbr
+                          		on zbr.zip = rp.zip
+                          	join geog.zip_boundaries_wa zbc
+                          		on zbc.zip = phys_zip_5
+                          where isnull(rp.discharge_dt, '3999-01-01') >= '2014-01-01'
+                              and removal_dt < '2014-01-01'
+                          	and phys_zip_5 is not null
+                          	and rp.zip <> '99999'")
+
+zips_tcount <- sqlQuery(cn, "select
+                            rp.zip rem_zip
+                            ,pd.phys_zip_5 cur_zip
+                            ,rp.cd_region
+                            ,zbc.totrescnt totrescnt_c
+                            ,zbr.totrescnt totrescnt_r
+                            ,zbc.lon lon_c
+                            ,zbr.lon lon_r                
+                            ,count(*) tcount
+                          from ca_ods.base.rptPlacement rp
+                            join ca_ods.dbo.placement_fact pf
+                          		on pf.id_placement_fact = rp.id_placement_fact 
+                          	join ca_ods.dbo.provider_dim pd
+                          		on pd.id_provider_dim = pf.id_provider_dim_caregiver
+                          	join geog.zip_boundaries_wa zbr
+                          		on zbr.zip = rp.zip
+                          	join geog.zip_boundaries_wa zbc
+                          		on zbc.zip = phys_zip_5
+                          where isnull(rp.discharge_dt, '3999-01-01') >= '2014-01-01'
+                              and removal_dt < '2014-01-01'
+                          	and phys_zip_5 is not null
+                          	and rp.zip <> '99999'
+                          group by 
+                            rp.zip
+                          	,pd.phys_zip_5
+                            ,rp.cd_region
+                            ,zbc.totrescnt
+                            ,zbr.totrescnt
+                            ,zbc.lon
+                            ,zbr.lon")
+
+zips_dat <- sqldf("select 
+                      zd.* 
+                      ,tcount
+                    from zips_dat zd
+                      left join zips_tcount zt
+                        on zd.rem_zip = zt.rem_zip
+                          and zd.cur_zip = zt.cur_zip")
+```
+
+```{r create_spatial_polygon, cache=TRUE, echo=FALSE, message=FALSE, tidy=FALSE,  eval=FALSE}
+zips <- SpatialPolygonsDataFrame(readWKT(zip_bound$zip_geom[1]
+                                 ,zip_bound$zip[1])
+                         ,data.frame(zip = c(as.character(zip_bound$zip[1]))
+                                     ,row.names = c(as.character(zip_bound$zip[1]))
+                                     )
+                         )
+
+for (i in 2:length(zip_bound$zip)) {
+  zips <- rbind(zips
+                   ,SpatialPolygonsDataFrame(readWKT(zip_bound$zip_geom[i]
+                                              ,zip_bound$zip[i])
+                                      ,data.frame(zip = c(as.character(zip_bound$zip[i]))
+                                                  ,row.names = c(as.character(zip_bound$zip[i]))
+                                                  )
+                                      )
+                  )
+}
+
+NAD83 <- CRS("+init=epsg:4269 +proj=longlat +ellps=GRS80 +datum=NAD83 +no_defs +towgs84=0,0,0")
+
+zips@proj4string <- NAD83
+```
+
+```{r sample_point_from_zips, cache=TRUE, echo=FALSE, message=FALSE, tidy=FALSE,  eval=FALSE}
+zips_dat$id <- seq(1:length(zips_dat$rem_zip))
+n <- length(zips_dat$rem_zip)
+x <- rep(0, n)
+y <- rep(0, n)
+coords <- cbind(x, y)
+rem.sp = SpatialPoints(coords)
+cur.sp = SpatialPoints(coords)
+
+#need to set iter argument > 4 or these loops will fail. 10 seems to work. 
+
+for (i in 1:n) {
+  cur.sp@coords[i,1:2] <- spsample(zips[zips$zip==zips_dat$rem_zip[i],]
+                                   ,n=1
+                                   ,type='random'
+                                   ,iter = 10)@coords[1,1:2]
+}
+
+for (i in 1:n) {
+  rem.sp@coords[i,1:2] <- spsample(zips[zips$zip==zips_dat$cur_zip[i],]
+                                   ,n=1
+                                   ,type='random'
+                                   ,iter=10)@coords[1,1:2]
+}
+
+
+rem.spd <- SpatialPointsDataFrame(rem.sp
+                                  ,data.frame(rem_zip = zips_dat$rem_zip
+                                              ,cur_zip = zips_dat$rem_zip
+                                              ,tcount = zips_dat$tcount
+                                              ,row.names = c(as.character(zips_dat$id)))
+)
+
+#rem.spd <- rem.spd[order(rem.spd$tcount),]
+
+cur.spd <- SpatialPointsDataFrame(cur.sp
+                      ,data.frame(rem_zip = zips_dat$rem_zip
+                                  ,cur_zip = zips_dat$rem_zip
+                                  ,tcount = zips_dat$tcount
+                                  ,row.names = c(as.character(zips_dat$id)))
+)
+
+#cur.spd <- cur.spd[order(cur.spd$tcount),]
+```
+
+The map below displays the movements of all children placed in out-of-home care in Washington State on January 1, 2014. The map displays a network of connections between the original location from which a child was removed and the location in which they were placed as of January 1. 
+
+```{r plot_net, echo=FALSE, message=FALSE, results='hide', cache=TRUE, tidy=FALSE, eval=FALSE}
+png(file="C:/Users/mienkoja/Dropbox/movement_blog/figure/map.png", width=15, height = 12, units="in", res = 320)
+plot(zips
+     ,col = "#e7eef1"
+     ,lwd=0.05
+     ,border="#e7eef1"
+     )
+pb <- txtProgressBar(min = 0, max = n, style = 3)
+
+dist_d <- data.frame(zip=rep(NA, n), dist=rep(NA, n))
+
+for (i in 1:n) {
+  inter <- gcIntermediate(c(rem.spd@coords[i,1], rem.spd@coords[i,2])
+                          ,c(cur.spd@coords[i,1], cur.spd@coords[i,2])
+                          ,n=100
+                          ,addStartEnd=TRUE
+                          ,sp=TRUE)
+  inter@proj4string <- NAD83
+  rem.spd$rem_zip
+  lines(inter
+        ,col=hsv(0, 0, 0.2, 0.4)
+        ,lwd=0.4)
+  dist_d[i,1] <- rem.spd$rem_zip[i]
+  dist_d[i,2] <- SpatialLinesLengths(inter)
+    setTxtProgressBar(pb, i)
+}
+close(pb)
+dev.off()
+```
+<img src="C:/Users/mienkoja/Dropbox/movement_blog/figure/map.png" alt="Network" style="width: 750px;"/>
+
+The map shows that most of the movement activity is taking place in urban centers. This could be due to the fact that, within these urban centers, there are large numbers of children moving relatively short distances. It could also be due to the fact that large numbers of children are entering or leaving these urban centers. Whatever the case, at least some children have made relatively long moves (e.g. from Seattle to Spokane or vice versa). 
+
+In order to get a better sense of how these movements cluster in different parts of the state, it is helpful to examine what this network might look from a different dimension. One technique that might be helpful to examine these clusters is through the use of an arc diagram. Arc diagrams have been around for decades but were made popular by [Martin Wattenberg](http://www.bewitched.com/index.html), a former data scientist at IBM who used arc diagrams to map complex sentence structure. 
+
+In this chart, we plot a series of points representing every zip code in the State of Washington from which children were removed (or in which children were placed on January 1). We order the points from West to East for ease of comparison with the network map. Next, we draw a series of arcs between each point. For pairs of zip codes which have multiple transitions, we increase the thickness of the arc (i.e. an arc with 5 transitions will be 5 times as thick as an arc with 1 transition). 
+
+```{r prepare_arc_plot_data, echo=FALSE, message=FALSE, tidy=FALSE, eval=FALSE}
+# subset zips_tcount to only those zip codes transitioning to another zip code
+# this prevents arcs from plotting to the same node
+zips_tcount_ft <- sqldf("select * from zips_tcount where rem_zip <> cur_zip")
+
+#create a dataframe of all unique zip codes
+vlabels <- unique(c(zips_tcount_ft$rem_zip, zips_tcount_ft$cur_zip))
+vlabels_d <- as.data.frame(vlabels)
+vlabels_d <- sqldf("select * from vlabels_d order by vlabels")
+
+#create a dataframe of the longitude for each zip centroid
+lon_d_c <- sqldf("select distinct
+                    cur_zip zip
+                    ,lon_c lon
+                  from zips_tcount_ft zt")
+lon_d_r <- sqldf("select distinct
+                    rem_zip zip 
+                    ,lon_r lon
+                  from zips_tcount_ft zt")
+lon_d <- rbind(lon_d_c, lon_d_r)
+lon_d <- sqldf("select distinct
+                      zip
+                      ,lon
+                    from lon_d d
+                   order by zip")
+
+#create a dataframe of the edges (i.e. the transitions)
+edgelist <- as.matrix(zips_tcount_ft[,1:2])
+#create an associated dataframe for edgelist (i.e. the number of times a transition takes place)
+values <- zips_tcount_ft$tcount
+
+#generate a sparse label variable to help people understand location in the arcplot
+city_lab_d <- data.frame(city_lab = rep(NA, length(vlabels_d$vlabels)), zip = vlabels_d$vlabels)
+for (i in 1:length(vlabels_d$vlabels)){
+  if(vlabels_d$vlabels[i] == 98357){
+    city_lab_d[i,1] <-"Neah Bay"
+  } else if (vlabels_d$vlabels[i] == 98501){
+    city_lab_d[i,1] <-"Olympia"
+  } else if (vlabels_d$vlabels[i] == 98115){
+    city_lab_d[i,1] <-"Seattle"
+  } else if (vlabels_d$vlabels[i] == 98902){
+    city_lab_d[i,1] <-"Yakima" 
+  } else if (vlabels_d$vlabels[i] == 99336){
+    city_lab_d[i,1] <-"Kennewick" 
+  } else if (vlabels_d$vlabels[i] == 99362){
+    city_lab_d[i,1] <-"Walla Walla" 
+  } else if (vlabels_d$vlabels[i] == 99208){
+    city_lab_d[i,1] <-"Spokane" 
+  } else{
+    city_lab_d[i,1] <-""
+  }  
+}
+
+
+#create an ordering variable (ordered by longitude)
+x = data.frame(vlabels=vlabels_d$vlabels, lon_d$lon, city_lab_d$city_lab,ind = 1:length(vlabels_d$vlabels))
+y = arrange(x,lon_d$lon)
+new_ord = y$ind
+
+```
+
+```{r plot_arc, echo=FALSE, cache=TRUE, message=FALSE, tidy=FALSE, eval=FALSE}
+png(file="C:/Users/mienkoja/Dropbox/movement_blog/figure/arcplot.png", width=15, height = 12, units="in", res = 320)
+#op <- par(family = "`Frutiger LT Std 55 Roman`", col.lab="black")
+arcplot(edgelist
+        ,ordering = new_ord
+        ,show.nodes = TRUE
+        ,show.labels = TRUE
+        ,labels = city_lab_d$city_lab
+        ,col.nodes = "#3B6E8F"
+        ,bg.nodes = "#3B6E8F"
+        ,pch.nodes = 21
+        ,lwd.nodes = 1
+        ,cex.nodes = 1
+        ,col.arcs = hsv(0, 0, 0.2, 0.1)
+        ,lwd.arcs = values
+        ,family = "Frutiger LT Std 55 Roman"
+        ,col.lab="black"
+        ,cex.lab= 1)
+#par(op)
+dev.off()
+```
+
+<img src="C:/Users/mienkoja/Dropbox/movement_blog/figure/arcplot.png" alt="Arc Diagram" width="600" height="480"/>
+
+The darker areas of the arc plot shows us that, while there is certainly movement activity taking place _across_ the state, much of the _within_ urban centers. In particular, we see that many of the arcs hover right around the Seattle zip codes (i.e. the I-5 corridor). 
+
+To examine this pattern further, we can do a simple plot the pattern of movements between various zip codes as shown below. 
+
+```{r plot_zip_to_zip, echo=FALSE, warnings=FALSE, message=FALSE, cache=TRUE, tidy=FALSE, dev='png', fig.width=15, fig.height=12, dpi=50, error=FALSE, results='hide', eval=FALSE}
+
+png(file="C:/Users/mienkoja/Dropbox/movement_blog/figure/zip_to_zip.png", width=15, height = 12, units="in", res = 320)
+
+
+breaks <- sqldf("select distinct 
+                lon_d_lon
+                ,city_lab_d_city_lab 
+                from y 
+                where 
+                city_lab_d_city_lab <> ''")
+
+
+break_pts <- breaks$lon_d_lon
+
+break_lab <- breaks$city_lab_d_city_lab
+
+ggplot(zips_dat, aes(x=lon_c, y=lon_r)) + 
+    geom_point(alpha=1/10, colour="#294d64") +
+    scale_x_continuous(breaks = break_pts, labels = break_lab) +
+    scale_y_continuous(breaks = break_pts, labels = break_lab) +
+    xlab("Removal Location") +
+    ylab("Current Location") +
+    theme_bw() +
+    theme(text=element_text(size=16, family="Frutiger LT Std 45 Light")
+          ,axis.text.x=element_text(angle=90))
+dev.off()
+```
+<img src="C:/Users/mienkoja/Dropbox/movement_blog/figure/zip_to_zip.png" alt="Zip to Zip Plot" width="600" height="480"/>
+
+In this plot, we again rank zip codes from east to west and plot a point on the chart for each movement taking place between the zip codes. Those points on the chart representing multiple movements (i.e. multiple children moving from one zip code to another), are plotted darker than those will smaller numbers or movements.  As suggested in the arc plot, most of the movements are taking place _within_ urban centers. Does this mean that children removed from urban centers are less likely to be moved over larger distances than children from more rural areas?
+
+```{r calc_avg_dist, cache=TRUE, echo=FALSE, message=FALSE, tidy=FALSE, eval=FALSE}
+dist_by_zip <- sqldf("select zip, avg(dist) avg from dist_d group by zip")
+dist_by_zip$avg <- as.numeric(dist_by_zip$avg)
+med <- as.numeric(names(table(summary(dist_by_zip$avg)))[3])
+#assign to zips
+zips <- merge(x = zips, y = dist_by_zip, by = "zip", all.x=TRUE)
+#zips <- subset(zips, select=c(zip))
+```
+To answer this question, it is first useful to figure out what we might _expect_ to see for a distance between a child's current location and their original removal location. One way of figuring this out is to calculate a median. The median value of the distance between removal location and current location for all children in care on January 1 is 23.95 miles. In other words _most_ children are placed relatively close to their homes. This is illustrated in the histogram below where we plot a vertical line at our median value. _Half_ of the child distances in our sample are to the left of this line. 
+
+```{r plot_hist, echo=FALSE, message=FALSE, tidy=FALSE, eval=FALSE}
+png(file="C:/Users/mienkoja/Dropbox/movement_blog/figure/hist.png", width=15, height = 12, units="in", res = 320)
+
+dist_d$dist_m <- dist_d$dist*0.621371
+ggplot(dist_d, aes(x=dist_m)) + 
+  geom_histogram(aes(y=..count../sum(..count..))
+                 ,breaks=seq(from=0, to=600, by=5)
+                 ,colour="#294d64"
+                 ,fill="#294d64") +
+  scale_y_continuous(labels = percent) +
+  scale_x_continuous(breaks = c(seq(0, 100, 20), seq(100, 600, 200))) + 
+  xlab("Miles from Removal Location") +
+  ylab("Percentage of Children") +
+  geom_vline(xintercept = 23.95) +
+  annotate("text", x = 60, y = .14, label = "Median Distance", family="Frutiger LT Std 45 Light") +
+  theme_bw() +
+  theme(text=element_text(size=16, family="Frutiger LT Std 45 Light")
+        ,axis.text.x=element_text(angle=90))
+dev.off()
+```
+<img src="C:/Users/mienkoja/Dropbox/movement_blog/figure/hist.png" alt="Distance Histogram" width="600" height="480"/>
+
+Using this information, we can plot a map of all zip codes in the state and color them based on whether or not children from this zip code tend have moved more or less than the median value.
+
+```{r plot_dist, echo=FALSE, message=FALSE, eval=FALSE, cache=TRUE, tidy=FALSE}
+
+png(file="C:/Users/mienkoja/Dropbox/movement_blog/figure/map2.png", width=15, height = 12, units="in", res = 320)
+#par(border = NA)
+
+
+
+plot(zips
+     ,col=ifelse(zips$avg < med & is.na(zips$avg) == FALSE
+                 ,"#294d64"
+                 ,ifelse(zips$avg >= med & is.na(zips$avg) == FALSE
+                         ,"#b0c5d2","#e7eef1")
+                       )
+     ,border=FALSE
+     )
+op <- par(family="Archer Bold") 
+title(main = "Distance from Original Removal Location", cex.main=2.0)
+op <- par(bg = NA, family="Frutiger LT Std 45 Light") 
+legend(-119.25, 45.85
+       ,c("Less than median"
+          ,"More than median"
+          ,"No children removed from zip")
+       ,fill = c("#294d64", "#b0c5d2", "#e7eef1")
+       ,bty = "n"
+       ,cex = 1.5
+       )
+par(op)
+dev.off()
+```
+<img src="C:/Users/mienkoja/Dropbox/movement_blog/figure/map2.png" alt="Distance" width="600" height="480"/>
+
+
+As we suspected, it does appear that children removed from urban zip codes tend to have smaller movement distances than children removed from more rural zip codes. There are, however, several urban zip codes where children do have longer movement distances. 
+
+
+There are several reasons why children removed from certain geographic regions might tend to be placed further away from their removal locations than others. Perhaps the simplest explanation is a tendency for rural areas to have a higher average distance between residences than urban areas (i.e. things are just more spread out in rural areas). Another possibility is that there may be a smaller number of foster homes available for children removed in a particular zip code. (e.g. the closest available foster home for a child removed from Colville may be in Spokane). 
+
+Future research by POC and future measurements in the [data portal](partnersforourchildren.org/data-portal) will examine these possibilities with more detailed analysis. 
+
+
+
