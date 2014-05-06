@@ -1,0 +1,214 @@
+Does referral time matter?
+========================================================
+*Gregor Passolt, POC Data Scientist*
+
+Every [CPS](http://www.partnersforourchildren.org/data-portal/glossary#cps) investigation begins with a referral (also called an intake),
+where someone reports child abuse or neglect to Children's Administration (CA).
+(Instructions for reporting abuse or neglect can be found on [Children's Administration's website](http://www.dshs.wa.gov/ca/safety/abusereport.asp?2).)
+Generally, a little over half of these referrals are "screened in" for additional
+services, such as a CPS investigation or [Family Assessment Response (FAR)](http://www.partnersforourchildren.org/about-us/blog/new-way-serving-vulnerable-families-needs-funding-legislature) visit.
+As a result of an investigation some allegations of child abuse or neglect are substantiated, some are not. Either way, Children's Administration is responsible for taking the necessary steps to ensure the safety of the child.
+
+```{r echo = FALSE}
+my_fig.height <- 3.5
+rel_y_size <- 3
+knitr:::opts_chunk$set(echo = F,
+               message = F,
+               warning = F,
+               fig.align = "center",
+               fig.width = 7,
+               fig.height = my_fig.height)
+```
+
+```{r}
+require(pocr, quietly = T)
+```
+
+```{r}
+query <-
+    "select datepart(hh, rfrd_date) referral_hour
+, cd_access_type
+, tx_access_type
+, cd_invs_type
+, tx_invs_type
+, case when tx_final_decision = 'Screen In' then 1 else 0 end fl_screened_in 
+, tx_final_decision
+, case when cd_access_type = 1 and isnull(cd_invs_type, 1) = 1 then 1 else 0 end fl_cps
+, fl_allegation_any
+, fl_founded_any_legal
+, cd_reporter
+, tx_reporter
+from ca_ods.base.tbl_intakes
+where year(rfrd_date) = 2013"
+con <- odbcConnect("POC")
+intakes <- sqlQuery(con, query)
+odbcClose(con)
+
+require(dplyr, quietly= T)
+int_summ <- intakes %.%
+    group_by(referral_hour) %.%
+    summarise(count = n())
+```
+
+At POC, we want to share data that gets people thinking.
+Today, we will look at the time of day that referrals come in and see if we can find any interesting patterns.
+We'll start by examining all reports of abuse and neglect from 2013---a whopping `r prettyNum(round(nrow(intakes), -2), big.mark = ",")` referrals!
+
+We've drawn the first graph in two ways: as a normal bar graph and as a *radial* bar graph. Both graphs show the same information: there's one bar for each hour, and the length of the bar shows how many referrals were made in that hour. We're used to seeing bar graphs, but for this data there's a problem: there's a "first" time on the left and a "last" time on the right. Hours are circular, with midnight being next to both 11 pm and 1 am, so we use a radial bar graph that shows a more fluid picture that can help us see the overall patterns.
+
+```{r}
+intakes$hr <- factor(intakes$referral_hour)
+levels(intakes$hr)[c(0, 12) + 1] <- c("Midnight", "Noon")
+levels(intakes$hr)[1:11 + 1] <- paste(levels(intakes$hr)[1:11 + 1], "am")
+levels(intakes$hr)[13:23 + 1] <- paste(1:11, "pm")
+
+labels <- seq(3, 9, by = 3) * 1000
+xlabs <- levels(intakes$hr)
+xlabs[rep(c(F, T, T), 4)] <- ""
+
+intake_plot <- ggplot(intakes, aes(x = hr)) +
+    geom_histogram(fill = poc_colors[3]) +
+     labs(x = "", y = "",
+         title = "Number of Referrals by Time of Day") +
+    scale_x_discrete(labels = xlabs) +
+    theme_bw()
+        
+intake_bar <- intake_plot +
+    scale_y_continuous(labels = comma_format()) +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0),
+          plot.title = element_text(size = rel(1)))
+# intake_bar
+
+intake_rad <- intake_plot + 
+    coord_polar(start = - 1 / 24 * pi) +
+    theme(rect = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          plot.title = element_text(size = rel(1))) +   
+    annotate(geom = "text",
+             x = rep(c("Midnight", "Noon"), each = length(labels)),
+             y = rep(labels, 2),
+             color = "gray40",
+             size = rel(rel_y_size), 
+             label = rep(prettyNum(labels, big.mark = ","), 2))    
+
+grid.arrange(intake_bar, intake_rad, ncol = 2)
+```
+
+As you can see, there are no real surprises in this first graph (though there is a little dip during the lunch hour).
+Almost all referrals come in during the day time, with the peak from 2-4 o'clock.
+School days are winding down at that point in the afternoon, and educators are one of biggest sources of referrals.
+Could educators be driving the afternoon bump?
+Let's compare them with another common source of referrals: law enforcement officers.
+
+```{r}
+labels <- seq(5, 20, by = 5) * 100
+ggplot(subset(intakes, tx_reporter %in% c("Educator", "Law Enforcement Officer")),
+       aes(x = hr, fill = tx_reporter)) +
+    geom_histogram() +
+    scale_fill_manual(values = poc_colors[3:2], guide = F) +
+    theme_bw() +
+    theme(rect = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          plot.title = element_text(size = rel(1))) +
+    labs(x = "", y = "",
+         title = "Intakes by Reporter") +
+    scale_x_discrete(labels = xlabs) +
+    coord_polar(start = - 1 / 24 * pi) +
+    annotate(geom = "text",
+             x = rep(c("Midnight", "Noon"), each = length(labels)),
+             y = rep(labels, 2),
+             color = "gray40",
+             size = rel(rel_y_size), 
+             label = rep(prettyNum(labels, big.mark = ","), 2)) +
+    facet_wrap(~ tx_reporter, ncol = 2)
+```
+
+Sure enough, educators contributed over 2,000 referrals to each of the 2 and 3 o'clock hours, and have no visible activity at night. Law enforcement officers, on the other hand, are relatively active at night (considering how few night referrals there are over all), but have their peak times at the start of the work day, between 8 and 11 am. Perhaps that's when paperwork gets filed from the previous night's cases? We can only speculate, but it is a possibility.
+
+We've established that most referrals come in during the work day. But when do the referrals that require follow-up happen? When we look at the percent of referrals that are screened in for additional investigations and assessments, the numbers paint a different picture.
+
+```{r fig.width=3.5}
+si <- intakes %.% group_by(hr) %.%
+    summarise(si_prop = mean(fl_screened_in))
+gridlines <- si[, "hr", drop = F]
+gridlines$y <- 0.5
+gridlines <- rbind(gridlines, gridlines[1, ])
+
+labels <- c(0.25, 0.5, 0.75)
+
+ggplot(si,
+       aes(x = hr, y = si_prop)) +
+    geom_bar(stat = "identity", fill = poc_colors[3]) +
+    theme_bw() +
+    theme(rect = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          plot.title = element_text(size = rel(1))) +
+    labs(x = "", y = "",
+         title = "Percentage of Referrals Screened In") +
+    scale_x_discrete(labels = xlabs) +
+    coord_polar(start = - 1 / 24 * pi) +
+    scale_y_continuous(limits = c(0, 0.75), expand = c(0, 0),
+                       breaks = labels) +
+    geom_hline(yintercept = labels,
+               color = c("gray70", "gray70", "gray90")) +
+        annotate(geom = "text",
+             x = rep(c("Midnight", "Noon"), each = length(labels)),
+             y = rep(labels, 2) - 0.02,
+             color = "gray40",
+             size = rel(rel_y_size), 
+             label = rep(paste0(100 * labels, "%"), 2))
+
+cps <- intakes %.%
+    filter(fl_cps == 1) %.%
+    group_by(referral_hour) %.%
+    summarise(prop_founded = mean(fl_founded_any_legal),
+              count = n())
+cps$hr <- si$hr
+```
+
+Things look a lot more even between day and night, and actually after about 9 pm the percentage of referrals screened in goes well above the 50% line, with peak times between 1 and 4 am.
+
+If late night cases are more likely to be screened in, is there a comparable increase in the substantiation rates? To investigate, we narrowed our focus to only those referrals that received a CPS investigation, and looked at the percentage of those that end up with any legal finding of abuse or neglect. The average substantiation rate for these cases is about `r paste0(round(100 * weighted.mean(x=cps$prop_founded, w = cps$count)), "%")`---still quite low---but it varies a lot by the time of the referral.
+
+```{r fig.width=3.5}
+labels <- seq(.05, 0.2, by = 0.05)
+
+ggplot(cps,
+       aes(x = hr, y = prop_founded)) +
+    geom_bar(stat = "identity", fill = poc_colors[3]) +
+    theme_bw() +
+    theme(rect = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          plot.title = element_text(size = rel(1))) +
+    labs(x = "", y = "",
+         title = "Percentage of CPS Investigations\nResulting in a Substantiated Allegation") +
+    scale_x_discrete(labels = xlabs) +
+    coord_polar(start = - 1 / 24 * pi) +
+    scale_y_continuous(limits = c(0, 0.2), expand = c(0, 0),
+                       breaks = labels) +
+    geom_hline(yintercept = labels,
+               color = c("gray70", "gray70", "gray70", "gray90")) +
+    annotate(geom = "text",
+             x = rep(c("Midnight", "Noon"), each = length(labels)),
+             y = rep(labels, 2) - 0.01,
+             color = "gray40",
+             size = rel(rel_y_size), 
+             label = rep(paste0(100 * labels, "%"), 2))
+```
+
+What does this all mean? Essentially, while the vast majority of referrals--even substantiated referrals---occur during the day, late night referrals are more likely to be screened in and to result in a substantiated allegation of child abuse or neglect.
+At this point, we can only speculate about why, but it makes sense that referrals serious enough that someone is reporting them in the wee hours of the morning tend to be more severe.
+
+This is just a glance at some of our ongoing data work.
+Time of day isn't the only interesting variable for referrals---in a future post we'll take a look at "bigger" time trends: different days of the week, holidays, and school vacations.
+
+Are you curious about anything that could be addressed in a future data blog post? If so, comment below or send us your ideas at <info@partnersforourchildren.org>.
+
+### Acknowledgements
+The data used here is from Washington State's Children's Administration, which generously shares data with Partners for Our Children on a quarterly basis.
+
+This blog entry was created using `rmarkdown` and `knitr`, and the graphics were produced using `ggplot2`, all packages for the R programming language. We'd like to thank the creators of these wonderful open-source tools.
