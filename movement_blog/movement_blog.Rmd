@@ -39,25 +39,34 @@ zip_bound <- sqlQuery(cn, "select
                       from geog.zip_boundaries_wa zbr")
 
 zips_dat <- sqlQuery(cn, "select
-                            rp.zip rem_zip
-                          	,pd.phys_zip_5 cur_zip
-                            ,zbc.lon lon_c
-                            ,zbr.lon lon_r  
-                            ,zbc.lat lat_c
-                            ,zbr.lat lat_r  
-                          from ca_ods.base.rptPlacement rp
-                          	join ca_ods.dbo.placement_fact pf
-                          		on pf.id_placement_fact = rp.id_placement_fact 
-                          	join ca_ods.dbo.provider_dim pd
-                          		on pd.id_provider_dim = pf.id_provider_dim_caregiver
-                          	join geog.zip_boundaries_wa zbr
-                          		on zbr.zip = rp.zip
-                          	join geog.zip_boundaries_wa zbc
-                          		on zbc.zip = phys_zip_5
-                          where isnull(rp.discharge_dt, '3999-01-01') >= '2014-01-01'
+                              rp.zip rem_zip
+                              ,pd.phys_zip_5 cur_zip
+                              ,zbc.lon lon_c
+                              ,zbr.lon lon_r  
+                              ,zbc.lat lat_c
+                              ,zbr.lat lat_r  
+                        	,isnull(rpx.berk_tx_plcm_setng, 'Other') berk_tx_plcm_setng
+                              from ca_ods.base.rptPlacement rp
+                              join ca_ods.dbo.placement_fact pf
+                                  on pf.id_removal_episode_fact = rp.id_removal_episode_fact 
+                      		join ca_ods.dbo.placement_type_dim ptd 
+                      			on pf.id_placement_type_dim = ptd.id_placement_type_dim 
+                              join ca_ods.dbo.provider_dim pd
+                                  on pd.id_provider_dim = pf.id_provider_dim_caregiver
+                      		left join ref_plcm_setting_xwalk rpx
+                      			on rpx.cd_plcm_setng=ptd.cd_plcm_setng
+                              join geog.zip_boundaries_wa zbr
+                                  on zbr.zip = rp.zip
+                              join geog.zip_boundaries_wa zbc
+                                  on zbc.zip = phys_zip_5
+                              where rp.discharge_dt >= '2014-01-01'
                               and removal_dt < '2014-01-01'
-                          	and phys_zip_5 is not null
-                          	and rp.zip <> '99999'")
+                      		and (pf.ID_CALENDAR_DIM_END >= 20140101 or pf.ID_CALENDAR_DIM_END = 0)
+                      		and pf.ID_CALENDAR_DIM_BEGIN < 20140101
+                              and phys_zip_5 is not null
+                              and rp.zip <> '99999'
+                      		and (berk_tx_plcm_setng in ('Foster', 'Group', 'Kin', 'Other', 'Shelter')
+                      		or berk_tx_plcm_setng is null)   ")
 
 zips_tcount <- sqlQuery(cn, "select
                             rp.zip rem_zip
@@ -68,19 +77,28 @@ zips_tcount <- sqlQuery(cn, "select
                             ,zbc.lon lon_c
                             ,zbr.lon lon_r                
                             ,count(*) tcount
+  	,isnull(rpx.berk_tx_plcm_setng, 'Other') berk_tx_plcm_setng
                           from ca_ods.base.rptPlacement rp
                             join ca_ods.dbo.placement_fact pf
-                          		on pf.id_placement_fact = rp.id_placement_fact 
-                          	join ca_ods.dbo.provider_dim pd
+                          		on pf.id_placement_fact = rp.id_placement_fact
+		join ca_ods.dbo.placement_type_dim ptd 
+			on pf.id_placement_type_dim = ptd.id_placement_type_dim 
+		left join ref_plcm_setting_xwalk rpx
+			on rpx.cd_plcm_setng=ptd.cd_plcm_setng
+                           	join ca_ods.dbo.provider_dim pd
                           		on pd.id_provider_dim = pf.id_provider_dim_caregiver
                           	join geog.zip_boundaries_wa zbr
                           		on zbr.zip = rp.zip
                           	join geog.zip_boundaries_wa zbc
                           		on zbc.zip = phys_zip_5
-                          where isnull(rp.discharge_dt, '3999-01-01') >= '2014-01-01'
-                              and removal_dt < '2014-01-01'
-                          	and phys_zip_5 is not null
-                          	and rp.zip <> '99999'
+        where rp.discharge_dt >= '2014-01-01'
+        and removal_dt < '2014-01-01'
+		and (pf.ID_CALENDAR_DIM_END >= 20140101 or pf.ID_CALENDAR_DIM_END = 0)
+		and pf.ID_CALENDAR_DIM_BEGIN < 20140101
+        and phys_zip_5 is not null
+        and rp.zip <> '99999'
+		and (berk_tx_plcm_setng in ('Foster', 'Group', 'Kin', 'Other', 'Shelter')
+		or berk_tx_plcm_setng is null)   
                           group by 
                             rp.zip
                           	,pd.phys_zip_5
@@ -88,7 +106,8 @@ zips_tcount <- sqlQuery(cn, "select
                             ,zbc.totrescnt
                             ,zbr.totrescnt
                             ,zbc.lon
-                            ,zbr.lon")
+                            ,zbr.lon
+							,isnull(rpx.berk_tx_plcm_setng, 'Other')")
 
 zips_dat <- sqldf("select 
                       zd.* 
@@ -153,6 +172,7 @@ rem.spd <- SpatialPointsDataFrame(rem.sp
                                   ,data.frame(rem_zip = zips_dat$rem_zip
                                               ,cur_zip = zips_dat$rem_zip
                                               ,tcount = zips_dat$tcount
+                                              ,plc = zips_dat$berk_tx_plcm_setng
                                               ,row.names = c(as.character(zips_dat$id)))
 )
 
@@ -179,7 +199,7 @@ plot(zips
      )
 pb <- txtProgressBar(min = 0, max = n, style = 3)
 
-dist_d <- data.frame(zip=rep(NA, n), dist=rep(NA, n))
+dist_d <- data.frame(zip=rep(NA, n), dist=rep(NA, n), plc=rep(NA, n))
 
 for (i in 1:n) {
   inter <- gcIntermediate(c(rem.spd@coords[i,1], rem.spd@coords[i,2])
@@ -194,6 +214,7 @@ for (i in 1:n) {
         ,lwd=0.4)
   dist_d[i,1] <- rem.spd$rem_zip[i]
   dist_d[i,2] <- SpatialLinesLengths(inter)
+  dist_d[i,3] <- rem.spd$plc[i]
     setTxtProgressBar(pb, i)
 }
 close(pb)
@@ -330,8 +351,30 @@ In this plot, we again rank zip codes from east to west and plot a point on the 
 
 ```{r calc_avg_dist, cache=TRUE, echo=FALSE, message=FALSE, tidy=FALSE, eval=FALSE}
 dist_by_zip <- sqldf("select zip, avg(dist) avg from dist_d group by zip")
+dist_by_zip_fc <- sqldf("select zip, avg(dist) avg from dist_d where plc = 1 group by zip")
+dist_by_zip_gp <- sqldf("select zip, avg(dist) avg from dist_d where plc = 2 group by zip")
+dist_by_zip_kn <- sqldf("select zip, avg(dist) avg from dist_d where plc = 3 group by zip")
+
 dist_by_zip$avg <- as.numeric(dist_by_zip$avg)
-med <- as.numeric(names(table(summary(dist_by_zip$avg)))[3])
+dist_by_zip_fc$avg <- as.numeric(dist_by_zip_fc$avg)
+dist_by_zip_gp$avg <- as.numeric(dist_by_zip_gp$avg)
+dist_by_zip_kn$avg <- as.numeric(dist_by_zip_kn$avg)
+
+
+med <- median(sqldf("select dist from dist_d")$dist)
+med_fc <- median(sqldf("select dist from dist_d where plc = 1")$dist)
+med_gp <- median(sqldf("select dist from dist_d where plc = 2")$dist)
+med_kn <- median(sqldf("select dist from dist_d where plc = 3")$dist)
+
+mn <- mean(sqldf("select dist from dist_d")$dist)
+mn_fc <- mean(sqldf("select dist from dist_d where plc = 1")$dist)
+mn_gp <- mean(sqldf("select dist from dist_d where plc = 2")$dist)
+mn_kn <- mean(sqldf("select dist from dist_d where plc = 3")$dist)
+
+#med_fc <- as.numeric(names(table(summary(dist_by_zip_fc$avg)))[3])
+#med_gp <- as.numeric(names(table(summary(dist_by_zip_gp$avg)))[3])
+#med_kn <- as.numeric(names(table(summary(dist_by_zip_kn$avg)))[3])
+
 #assign to zips
 zips <- merge(x = zips, y = dist_by_zip, by = "zip", all.x=TRUE)
 #zips <- subset(zips, select=c(zip))
@@ -351,8 +394,33 @@ ggplot(dist_d, aes(x=dist_m)) +
   scale_x_continuous(breaks = c(seq(0, 100, 20), seq(100, 600, 200))) + 
   xlab("Miles from Removal Location") +
   ylab("Percentage of Children") +
-  geom_vline(xintercept = 23.95) +
-  annotate("text", x = 60, y = .14, label = "Median Distance", family="Frutiger LT Std 45 Light") +
+  #geom_vline(xintercept = med*0.621371, size = 1, colour=poc_colors[1]) +
+  geom_vline(xintercept = mn_fc*0.621371, size = 1, colour=poc_colors[4]) +
+  geom_vline(xintercept = mn_gp*0.621371, size = 1, colour=poc_colors[4]) +
+  geom_vline(xintercept = mn_kn*0.621371, size = 1, colour=poc_colors[4]) +
+  #geom_vline(xintercept = med*0.621371, size = 1, colour=poc_colors[1]) +
+  #geom_vline(xintercept = med_fc*0.621371, size = 1, colour=poc_colors[4]) +
+  #geom_vline(xintercept = med_gp*0.621371, size = 1, colour=poc_colors[4]) +
+  #geom_vline(xintercept = med_kn*0.621371, size = 1, colour=poc_colors[4]) +
+  
+  annotate("text"
+           ,x = mn_fc*0.621371+6
+           ,y = .17
+           ,angle = 90
+           ,label = "Mean (Foster Care)"
+           ,family="Frutiger LT Std 45 Light") +
+  annotate("text"
+           ,x = mn_gp*0.621371+6
+           ,y = .17
+           ,angle = 90
+           ,label = "Mean (Group Care)"
+           ,family="Frutiger LT Std 45 Light") +
+  annotate("text"
+           ,x = mn_kn*0.621371-7
+           ,y = .17
+           ,angle = 90
+           ,label = "Mean (Kinship)"
+           ,family="Frutiger LT Std 45 Light") +
   theme_bw() +
   theme(text=element_text(size=16, family="Frutiger LT Std 45 Light")
         ,axis.text.x=element_text(angle=90))
