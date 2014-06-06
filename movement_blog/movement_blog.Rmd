@@ -334,8 +334,14 @@ break_pts <- breaks$lon_d_lon
 
 break_lab <- breaks$city_lab_d_city_lab
 
+levels1 <- levels(zips_dat$berk_tx_plcm_setng)
+index <- c(which(levels == 'Other'), which(levels== 'Shelter'))
+levels(zips_dat$berk_tx_plcm_setng)[index] <- 'Other'
+
+
 ggplot(zips_dat, aes(x=lon_c, y=lon_r)) + 
     geom_point(alpha=1/10, colour="#294d64") +
+  facet_wrap(~ berk_tx_plcm_setng) +
     scale_x_continuous(breaks = break_pts, labels = break_lab) +
     scale_y_continuous(breaks = break_pts, labels = break_lab) +
     xlab("Removal Location") +
